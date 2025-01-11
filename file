@@ -1,25 +1,121 @@
-from flask import Flask
+from flask import Flask, request, jsonify
 from flask_sqlalchemy import SQLAlchemy
-from flask_jwt_extended import JWTManager
+from flask_jwt_extended import JWTManager, create_access_token, jwt_required, get_jwt_identity
+from werkzeug.security import generate_password_hash, check_password_hash
+
+# Initialize the Flask app and extensions
+app = Flask(__name__)
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///skilltrack.db'
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+app.config['JWT_SECRET_KEY'] = 'your_jwt_secret_key'
 
 # Initialize extensions
-db = SQLAlchemy()
-jwt = JWTManager()
+db = SQLAlchemy(app)
+jwt = JWTManager(app)
 
-def create_app():
-    app = Flask(__name__)
+# Database models
+class User(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    username = db.Column(db.String(80), nullable=False, unique=True)
+    email = db.Column(db.String(120), nullable=False, unique=True)
+    password = db.Column(db.String(120), nullable=False)
 
-    # Configuration
-    app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///skilltrack.db'
-    app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-    app.config['JWT_SECRET_KEY'] = 'your_jwt_secret_key'
+    def __repr__(self):
+        return f"<User {self.username}>"
 
-    # Initialize extensions
-    db.init_app(app)
-    jwt.init_app(app)
+class Goal(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    title = db.Column(db.String(200), nullable=False)
+    description = db.Column(db.String(500))
+    is_completed = db.Column(db.Boolean, default=False)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
 
-    # Register blueprints or routes
-    from .routes import api_bp
-    app.register_blueprint(api_bp, url_prefix='/api')
+    user = db.relationship('User', backref=db.backref('goals', lazy=True))
 
-    return app
+    def __repr__(self):
+        return f"<Goal {self.title}>"
+
+# Create all tables
+with app.app_context():
+    db.create_all()
+
+# User Registration
+@app.route('/api/register', methods=['POST'])
+def register():
+    data = request.get_json()
+    hashed_password = generate_password_hash(data['password'], method='sha256')
+    new_user = User(username=data['username'], email=data['email'], password=hashed_password)
+
+    db.session.add(new_user)
+    db.session.commit()
+
+    return jsonify({"message": "User registered successfully!"}), 201
+
+# User Login
+@app.route('/api/login', methods=['POST'])
+def login():
+    data = request.get_json()
+    user = User.query.filter_by(email=data['email']).first()
+
+    if user and check_password_hash(user.password, data['password']):
+        access_token = create_access_token(identity=user.id)
+        return jsonify(access_token=access_token), 200
+    return jsonify({"message": "Invalid credentials"}), 401
+
+# Create a Goal
+@app.route('/api/goals', methods=['POST'])
+@jwt_required()
+def create_goal():
+    user_id = get_jwt_identity()
+    data = request.get_json()
+
+    new_goal = Goal(title=data['title'], description=data['description'], user_id=user_id)
+    db.session.add(new_goal)
+    db.session.commit()
+
+    return jsonify({"message": "Goal created successfully!"}), 201
+
+# Retrieve Goals
+@app.route('/api/goals', methods=['GET'])
+@jwt_required()
+def get_goals():
+    user_id = get_jwt_identity()
+    goals = Goal.query.filter_by(user_id=user_id).all()
+
+    return jsonify([{"id": goal.id, "title": goal.title, "description": goal.description, "is_completed": goal.is_completed} for goal in goals])
+
+# Update a Goal
+@app.route('/api/goals/<int:goal_id>', methods=['PUT'])
+@jwt_required()
+def update_goal(goal_id):
+    user_id = get_jwt_identity()
+    goal = Goal.query.filter_by(id=goal_id, user_id=user_id).first()
+
+    if not goal:
+        return jsonify({"message": "Goal not found"}), 404
+
+    data = request.get_json()
+    goal.title = data.get('title', goal.title)
+    goal.description = data.get('description', goal.description)
+    goal.is_completed = data.get('is_completed', goal.is_completed)
+
+    db.session.commit()
+    return jsonify({"message": "Goal updated successfully!"})
+
+# Delete a Goal
+@app.route('/api/goals/<int:goal_id>', methods=['DELETE'])
+@jwt_required()
+def delete_goal(goal_id):
+    user_id = get_jwt_identity()
+    goal = Goal.query.filter_by(id=goal_id, user_id=user_id).first()
+
+    if not goal:
+        return jsonify({"message": "Goal not found"}), 404
+
+    db.session.delete(goal)
+    db.session.commit()
+    return jsonify({"message": "Goal deleted successfully!"})
+
+# Main entry point to run the app
+if __name__ == '__main__':
+    app.run(debug=True)
